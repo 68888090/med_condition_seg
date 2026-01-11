@@ -1,0 +1,65 @@
+# config.yaml
+
+training:
+  logdir: "test"                 # directory to save the tensorboard logs
+  epochs: 100000                    # number of training epochs
+  num_steps: 100000              # number of training iterations
+  eval_num: 100                  # evaluation frequency
+  warmup_steps: 500              # warmup steps
+  batch_size: 1                 # number of batch size
+  sw_batch_size: 2             # number of sliding window batch size
+  resume: null                   # resume training (path to checkpoint)
+  loss_type: "SSL"               # loss type
+  log_num: 10
+
+model:
+  in_channels: 1                 # number of input channels
+  feature_size: 48               # embedding size
+  dropout_path_rate: 0.0         # drop path rate
+  spatial_dims: 3                # spatial dimension of input data
+  use_checkpoint: false          # use gradient checkpointing to save memory
+
+data:
+  # Intensity Scaling
+  a_min: -1000.0
+  a_max: 1000.0
+  b_min: 0.0
+  b_max: 1.0
+  
+  # Spacing
+  space_x: 1.5
+  space_y: 1.5
+  space_z: 2.0
+  
+  # ROI Size
+  roi_x: 64
+  roi_y: 64
+  roi_z: 64
+  
+  # Caching (Mutual exclusive usually, but listed here)
+  smartcache_dataset: false      # use monai smartcache Dataset
+  cache_dataset: false           # use monai cache Dataset
+  jsonlist: "/home/lhr/dataset/CSTPLung/data2.json"
+
+optimization:
+  lr: 4.0e-4                     # learning rate
+  decay: 0.1                     # decay rate
+  momentum: 0.9                  # momentum
+  lrdecay: true                 # enable learning rate decay
+  max_grad_norm: 1.0             # maximum gradient norm
+  grad_clip: true               # gradient clip
+  opt: "adamw"                   # optimization algorithm
+  lr_schedule: "warmup_cosine"
+
+system:
+  dist_url: "env://"             # url used to set up distributed training
+  local_rank: 0                  # local rank
+  noamp: false                    # Use Automatic Mixed Precision (注意：我将 noamp 改为了正向的 amp)
+  device: "cuda:0"               # device to use for training
+  distributed: false              # enable distributed training
+  workers: 4                  # number of workers for data loading
+  output_dir: '/home/lhr/dataset/checkpoints/swin-unetr'
+
+experiment:
+
+  name: "1_11_1"
