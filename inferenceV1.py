@@ -7,6 +7,7 @@ import matplotlib.patches as patches
 import json
 import re
 import os
+import SimpleITK as sitk
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Orientationd, 
     Spacingd, ScaleIntensityRanged, ToTensord, SpatialPadd,
@@ -32,7 +33,7 @@ except ImportError:
 CONFIG = {
     "image1_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/fixed_80_20190314.mhd",
     "image2_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/80_20220905.mhd",
-    "text_prompt": "Find nodules enlarged by -50",
+    "text_prompt": "Find nodules enlarged by 50",
     "test_json_data" : "/home/lhr/dataset/CSTPLung/data2.json",
     "checkpoint": "/home/lhr/dataset/checkpoints/swin-unetr/9_checkpoint_best.pth.tar",
     "roi_size": (64, 64, 64),
@@ -333,17 +334,33 @@ def main():
     
     # 执行变换
     data = transforms(data_dict)
+    def read_mhd_image(file_path):
+        """
+        读取 mhd 文件并返回图像数组及空间信息。
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"文件未找到: {file_path}")
+
+        itk_image = sitk.ReadImage(file_path)
+        numpy_image = sitk.GetArrayFromImage(itk_image)
+        print(np.unique(numpy_image))
+        # 去掉小于0的值
+        numpy_image[numpy_image < 0] = 0
+
+        # 获取空间元数据
+        origin = itk_image.GetOrigin()       # (x, y, z)
+        spacing = itk_image.GetSpacing()     # (x_sp, y_sp, z_sp)
+        direction = itk_image.GetDirection() # 9个元素的元组，展平的方向矩阵
+
+        return numpy_image, origin, spacing, direction
     
     # 【关键步骤】获取 Origin 以便对齐 GT
     # 变换后的 meta_dict 中 'affine' 矩阵的前三行第四列是 Origin
     # 如果没有 affine，这步会报错。Monai LoadImage 默认会有。
-    if "img1_meta_dict" in data and "affine" in data["img1_meta_dict"]:
-        affine = data["img1_meta_dict"]["affine"]
-        origin = affine[:3, 3].numpy() if isinstance(affine, torch.Tensor) else affine[:3, 3]
-        print(f"提取到图像 Origin (RAS): {origin}")
-    else:
-        print("Warning: 无法找到 Affine 矩阵，使用默认 Origin [0,0,0]。GT匹配可能不准。")
-        origin = np.array([0.0, 0.0, 0.0])
+    _ , origin, spacing, direction = read_mhd_image(CONFIG["image2_path"])
+
+    print(f"提取到图像 Origin (RAS): {origin}")
+
 
     # 准备 Tensor
     img1 = data["img1"].unsqueeze(0).to(device) # [1, C, R, A, S]
@@ -362,15 +379,8 @@ def main():
             return model(inputs[:, 0:1], inputs[:, 1:2], batch_text)[0] # 返回 tuple 第一个元素 heatmap
 
         combined_img = torch.cat([img1, img2], dim=1) 
-        hm_pred = inferer(combined_img, model_wrapper)
-        
-        # 注意：这里假设 size_pred 也是通过类似的 inferer 得到的，
-        # 或者模型直接输出 (hm, off, size)。如果 inferer 只返回了 hm，你需要修改 wrapper 返回所有。
-        # 为了演示，这里假设 hm_pred 包含了我们需要的信息，或者我们需要重写 wrapper 来同时输出 size
-        # 下面是一个 Hack，假设 inferer 只能输出一个 tensor，实际你可能需要分开 infer 或者修改模型输出
-        # 这里暂时模拟 size_pred (实际情况请修改 model_wrapper 返回拼接的 tensor 然后再拆分)
-        size_pred = torch.ones_like(hm_pred) * 10.0 # 假数据！请替换为真实预测
-        off_pred = torch.zeros_like(hm_pred)        # 假数据
+        outputs = inferer(combined_img, model_wrapper)
+        hm_pred, off_pred, size_pred = outputs
 
     # --- D. 后处理与评估 ---
     print(">>> 正在解码与评估...")
