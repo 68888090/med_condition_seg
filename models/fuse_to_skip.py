@@ -38,23 +38,23 @@ class catQ_T(nn.Module):
         return: (B, seq_len, feature_dim)
         '''
         
-        # b = text.shape[0]
+        b = text.shape[0]
         # print(text.shape, query.shape)
-        # text_global = text.mean(dim=1)
-        # query_global = query.mean(dim=1)
+        text_global = text.mean(dim=1)
+        query_global = query.mean(dim=1)
         # 生成全局注意力权重
-        # descriptors = self.alpha_generator(torch.cat((text_global, query_global), dim=1))
-        # alpha = descriptors.view(b, 1, -1)
+        descriptors = self.alpha_generator(torch.cat((text_global, query_global), dim=1))
+        alpha = descriptors.view(b, 1, -1)
 
-        # query_weights = alpha * query
-        # text_weights = (1 - alpha) * text
+        query_weights = alpha * query
+        text_weights = (1 - alpha) * text
 
-        # fused_seq = torch.cat([query_weights, text_weights], dim=1)
-        fused_seq = torch.cat([text, query], dim=1)
+        fused_seq = torch.cat([query_weights, text_weights], dim=1)
+        # fused_seq = torch.cat([text, query], dim=1)
         # 查看alpha的大小，通过均值的方式
-        # mean_alpha = alpha.mean(dim=-1)
-        # return fused_seq, mean_alpha
-        return fused_seq, 0.5
+        mean_alpha = alpha.mean(dim=-1)
+        return fused_seq, mean_alpha
+        # return fused_seq, 0.5
 
 class cat_to_3D(nn.Module):
     '''

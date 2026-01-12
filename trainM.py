@@ -73,7 +73,7 @@ def main():
     def save_checkpoint(state, filename='checkpoint.pth.tar'):
         torch.save(state, filename)
 
-    def train(args, epoch, global_step, train_loader, val_loader, best_loss, scaler, text_processor=None):
+    def train(args, epoch, global_step, train_loader, val_loader, best_loss, scaler,no_improve_count, patience, text_processor=None):
         
         # 【关键】设置 epoch，保证每个 epoch 随机数种子不同，shuffle 结果不同
         if args.distributed and hasattr(train_loader.sampler, 'set_epoch'):
@@ -81,6 +81,9 @@ def main():
         model.train()
         loss_train = []
         loss_train_cross = []
+
+        # 定义早停标志 (0: 继续, 1: 停止)
+        stop_signal = False
 
         for step, batch in enumerate(train_loader):
             optimizer.zero_grad()
@@ -119,6 +122,9 @@ def main():
                 label_batch = {'heatmap': heatmap_label, 'offset': offset_label, 'size': size_label}
                 # total_loss, (hm_loss,_) = loss_function(output, label)
                 total_loss, loss_dict = loss_function(pre_hm, pre_offset, pre_size, label_batch)
+                hm_max = pre_hm.max().item()
+                hm_min = pre_hm.min().item()
+
                 # =================== 【修改后的防爆显存版本】 ===================
                 if torch.isnan(total_loss) or torch.isinf(total_loss) or total_loss > 60000:
                     print(f"Warning: Bad batch detected at Global Step {global_step}!")
@@ -181,11 +187,13 @@ def main():
                         "train/size_loss": loss_dict['size_loss'].item(),
                         "train/lr": optimizer.param_groups[0]['lr'],
                         "train/step_time": time() - t1,
-                        # "train/alpha5": alphas[0].mean().item(),
-                        # "train/alpha4": alphas[1].mean().item(),
-                        # "train/alpha3": alphas[2].mean().item(),
-                        # "train/alpha2": alphas[3].mean().item(),
-                        # "train/alpha1": alphas[4].mean().item(),
+                        "train/alpha5": alphas[0].mean().item(),
+                        "train/alpha4": alphas[1].mean().item(),
+                        "train/alpha3": alphas[2].mean().item(),
+                        "train/alpha2": alphas[3].mean().item(),
+                        "train/alpha1": alphas[4].mean().item(),
+                        "train/hm_max": hm_max,
+                        "train/hm_min": hm_min,
                         "global_step": global_step  # 显式传入 step，对齐横坐标
                     })
                     print("Step:{}/{}, Loss:{:.4f}, Time:{:.4f}".format(global_step, args.num_steps, total_loss, time() - t1))
@@ -198,57 +206,68 @@ def main():
                         "train/size_loss": loss_dict['size_loss'].item(),
                         "train/lr": optimizer.param_groups[0]['lr'],
                         "train/step_time": time() - t1,
-                        # "train/alpha5": alphas[0].mean().item(),
-                        # "train/alpha4": alphas[1].mean().item(),
-                        # "train/alpha3": alphas[2].mean().item(),
-                        # "train/alpha2": alphas[3].mean().item(),
-                        # "train/alpha1": alphas[4].mean().item(),
+                        "train/alpha5": alphas[0].mean().item(),
+                        "train/alpha4": alphas[1].mean().item(),
+                        "train/alpha3": alphas[2].mean().item(),
+                        "train/alpha2": alphas[3].mean().item(),
+                        "train/alpha1": alphas[4].mean().item(),
+                        "train/hm_max": hm_max,
+                        "train/hm_min": hm_min,
                         "global_step": global_step  # 显式传入 step，对齐横坐标
                     })
                 print("Step:{}/{}, Loss:{:.4f}, Time:{:.4f}".format(global_step, args.num_steps, total_loss, time() - t1))
 
             global_step += 1
-            if args.distributed:
-                val_cond = (dist.get_rank() == 0) and (global_step % args.eval_num == 0)
-            else:
-                val_cond = global_step % args.eval_num == 0
-            '''
-            下面是进行验证的部分，先书写对应的验证函数
+            # =================== 【早停核心修改区域】 ===================
+            # 1. 判断是否是验证步 (所有 Rank 必须达成共识)
+            is_val_step = (global_step % args.eval_num == 0)
 
-            '''
-            
-            if val_cond:
-                loss_val, loss_val_cross = validation(args, val_loader)
-                print("Validation Loss:{:.4f}, Loss Reconstruction:{:.4f}".format(loss_val, loss_val_cross))
-                wandb.log({
-                        "val/total_loss": loss_val,
-                        "val/hm_loss": loss_val_cross,
-                        "global_step": global_step
-                    })
-                writer.add_scalar("Loss/Validation", loss_val, global_step)
-                writer.add_scalar("Loss/Validation Cross", loss_val_cross, global_step)
+            if is_val_step:
+                # 2. 定义一个 Tensor 用于进程间通信，0表示继续，1表示停止
+                should_stop = torch.tensor(0).to(args.device)
+
+                # 3. 只有 Rank 0 进行验证和决策
+                if args.rank == 0:
+                    loss_val, loss_val_cross = validation(args, val_loader)
+                    print(f"Validation Loss:{loss_val:.4f} (Best: {best_loss:.4f})")
+                    
+                    # 记录日志
+                    wandb.log({"val/total_loss": loss_val, "val/hm_loss": loss_val_cross, "global_step": global_step})
+                    writer.add_scalar("Loss/Validation", loss_val, global_step)
+
+                    # --- 早停逻辑判断 ---
+                    if loss_val < best_loss:
+                        best_loss = loss_val
+                        no_improve_count = 0  # 损失下降，计数器清零
+                        
+                        # 保存最佳模型
+                        save_checkpoint({
+                            'step': global_step,
+                            'state_dict': model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                        }, filename=os.path.join(args.output_dir, args.name+'_checkpoint_best.pth.tar'))
+                        print(f"Model saved! Best Val Loss: {best_loss:.4f}")
+                    else:
+                        no_improve_count += 1 # 损失没降，计数器+1
+                        print(f"Validation Loss did not improve. Counter: {no_improve_count}/{patience}")
+                        
+                        # 检查是否达到阈值
+                        if no_improve_count >= patience:
+                            print(f"Early Stopping Triggered! No improvement for {patience} consecutive checks.")
+                            should_stop += 1 # 标记为停止
+
+                # 4. 分布式同步：Rank 0 把决定告诉大家
+                if args.distributed:
+                    # 把 should_stop 从 src(0) 广播到所有其他进程
+                    dist.broadcast(should_stop, src=0)
                 
-                if loss_val < best_loss:
-                    best_loss = loss_val
-                    save_checkpoint({
-                        'step': global_step,
-                        'state_dict': model.state_dict(),
-                        'optimizer' : optimizer.state_dict(),
-                    }, filename=os.path.join(args.output_dir, args.name+'_checkpoint_best.pth.tar'))
-                    print(
-                            "Model was saved ! Best Recon. Val Loss: {:.4f}, Recon. Val Loss: {:.4f}".format(
-                                best_loss, loss_val_cross
-                            )
-                        )
-                else :
-                    print(
-                            "Model was not saved ! Best Recon. Val Loss: {:.4f} Recon. Val Loss: {:.4f}".format(
-                                best_loss, loss_val_cross
-                            )
-                        )
+                # 5. 检查是否停止
+                if should_stop.item() == 1:
+                    stop_signal = True
+                    break # 跳出 DataLoader 循环
         if args.lrdecay and args.lr_schedule == "poly":
             scheduler.step()
-        return global_step, total_loss, best_loss
+        return global_step, total_loss, best_loss, no_improve_count, stop_signal
 
     def validation(args, test_loader):
         model.eval()
@@ -399,7 +418,10 @@ def main():
     train_loader, test_loader = get_loader(args, text_processor)
 
     global_step = 0
+    # === 初始化早停相关变量 ===
     best_val = 1e8
+    no_improve_count = 0 # 连续未提升次数
+    patience_limit = 5   # 早停阈值：5次
     if args.amp:
         scaler = GradScaler()
     else:
@@ -414,7 +436,11 @@ def main():
     epoch = 0
     while global_step < args.num_steps:
         # 这里的 epoch 变量只是为了传给 train 函数做 log 或者 shuffle 用
-        global_step, loss, best_val = train(args, epoch, global_step, train_loader, test_loader, best_val, scaler, text_processor)
+        global_step, loss, best_val , no_improve ,stop_signal = train(args, epoch, global_step, train_loader, test_loader, best_val, scaler, no_improve_count, patience_limit, text_processor)
+        # 检查是否触发了早停
+        if stop_signal:
+            print(f"Training stopped early at Global Step {global_step}")
+            break # 跳出 while 循环，结束训练
         epoch += 1
     checkpoint = {"epoch": args.epochs, "state_dict": model.state_dict(), "optimizer": optimizer.state_dict()}
 

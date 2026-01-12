@@ -86,8 +86,8 @@ def check_data_loader(loader, save_dir="./debug_vis", num_batches=3):
         axes[2].set_title(f"Heatmap (Slice {z_slice})\nMax Val: {heatmap.max():.4f}")
         axes[2].axis('off')
         
-        # Overlay (CT1 + Heatmap)
-        axes[3].imshow(img_ct1[z_slice], cmap="gray")
+        # Overlay (CT2 + Heatmap)
+        axes[3].imshow(img_ct2[z_slice], cmap="gray")
         axes[3].imshow(heatmap[z_slice], cmap="jet", alpha=0.5) # 半透明叠加
         axes[3].set_title("Overlay")
         axes[3].axis('off')

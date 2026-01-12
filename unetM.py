@@ -11,6 +11,7 @@ from models.text_processor import LanguageProcessor
 from monai.networks.blocks import UnetrUpBlock, UnetOutBlock, UnetrBasicBlock
 from monai.networks.blocks.dynunet_block import UnetBasicBlock, UnetResBlock, get_conv_layer
 
+import math
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast
@@ -38,6 +39,13 @@ class NoduleDetectionHead(nn.Module):
         # 4. 尺寸头 (Diameter): 预测直径 d
         # 输出 (B, 1, D, H, W)
         self.size_head = nn.Conv3d(hidden_channels, 1, kernel_size=1, bias=True)
+
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        self.heatmap_head.bias.data.fill_(bias_value)
+        self.heatmap_head.weight.data.normal_(std=0.001)
+
+        
     @autocast(enabled=False)
     def forward(self, x):
         x = x.float()

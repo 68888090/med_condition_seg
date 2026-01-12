@@ -7,7 +7,7 @@ training:
   eval_num: 100                  # evaluation frequency
   warmup_steps: 500              # warmup steps
   batch_size: 1                 # number of batch size
-  sw_batch_size: 4             # number of sliding window batch size
+  sw_batch_size: 2             # number of sliding window batch size
   resume: null                   # resume training (path to checkpoint)
   loss_type: "SSL"               # loss type
   log_num: 10
@@ -42,7 +42,7 @@ data:
   jsonlist: "/home/lhr/dataset/CSTPLung/data2.json"
 
 optimization:
-  lr: 4.0e-4                     # learning rate
+  lr: 4.0e-5                     # learning rate
   decay: 0.1                     # decay rate
   momentum: 0.9                  # momentum
   lrdecay: true                 # enable learning rate decay
@@ -62,4 +62,4 @@ system:
 
 experiment:
 
-  name: "1_11_1"
+  name: "1_12_3"

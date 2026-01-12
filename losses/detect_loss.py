@@ -2,6 +2,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class HeatmapDiceLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, pred_sigmoid, gt_hm):
+        # pred_sigmoid: (B, 1, D, H, W) 已经经过 sigmoid
+        # gt_hm: (B, 1, D, H, W) 
+        
+        intersection = (pred_sigmoid * gt_hm).sum()
+        union = pred_sigmoid.sum() + gt_hm.sum()
+        
+        # 加上 smooth 防止除 0
+        dice = (2. * intersection + 1e-5) / (union + 1e-5)
+        
+        return 1.0 - dice
+
+
 class NoduleDetectionLoss(nn.Module):
     def __init__(self, weight_heatmap=1.0, weight_offset=1, weight_size=0.1):
         super().__init__()
@@ -61,7 +78,7 @@ class NoduleDetectionLoss(nn.Module):
             # gt_log_size = torch.log(gt_size_pos + d)
             # 预测效果不好的原因可能是在于不在像素角度去进行一个预测导致的的问题
             # loss_size = self.smooth_l1(pred_log_size, gt_log_size) / num_pos
-            norm_factor = 25.0 #数据统计值 
+            norm_factor = 5.0 #数据统计值 
 
             loss_size = self.smooth_l1(pred_size_pos / norm_factor, 
                            gt_size_pos / norm_factor) / num_pos
@@ -108,6 +125,7 @@ class NoduleDetectionLoss(nn.Module):
         if num_pos == 0:
             loss = loss -neg_loss_sum
         else:
-            loss = -(pos_loss_sum + neg_loss_sum) / num_pos
+            pos_weights = 10.0
+            loss = -(pos_weights * pos_loss_sum + neg_loss_sum) / num_pos
             
         return loss

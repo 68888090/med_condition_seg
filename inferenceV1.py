@@ -31,11 +31,11 @@ except ImportError:
 # 1. 用户配置区域
 # ==============================================================================
 CONFIG = {
-    "image1_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/fixed_80_20190314.mhd",
-    "image2_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/80_20220905.mhd",
-    "text_prompt": "Find nodules enlarged by 50",
+    "image1_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/fixed_104_20220613.mhd",
+    "image2_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/104_20220617.mhd",
+    "text_prompt": "Can you find nodules that appeared?",
     "test_json_data" : "/home/lhr/dataset/CSTPLung/data2.json",
-    "checkpoint": "/home/lhr/dataset/checkpoints/swin-unetr/9_checkpoint_best.pth.tar",
+    "checkpoint": "/home/lhr/dataset/checkpoints/swin-unetr/1_11_1_checkpoint_best.pth.tar",
     "roi_size": (64, 64, 64),
     "roi_x": 64, "roi_y": 64, "roi_z": 64,
     "sw_batch_size": 4,
@@ -376,7 +376,7 @@ def main():
             # 假设 model forward 接收 (img1, img2, text)
             # 注意：SlidingWindowInferer 会把 img1 和 img2 拼在一起送进来
             # inputs shape: [B, 2, R, A, S]
-            return model(inputs[:, 0:1], inputs[:, 1:2], batch_text)[0] # 返回 tuple 第一个元素 heatmap
+            return model(inputs[:, 0:1], inputs[:, 1:2], batch_text)[0] # 返回 tuple 第一个元组
 
         combined_img = torch.cat([img1, img2], dim=1) 
         outputs = inferer(combined_img, model_wrapper)
@@ -384,6 +384,10 @@ def main():
 
     # --- D. 后处理与评估 ---
     print(">>> 正在解码与评估...")
+    # 解析一下hm_pred
+    print(hm_pred.shape)
+    print(f'hm_pred 最大值: {hm_pred.max().item()}')
+    print(f'hm_pred 最小值: {hm_pred.min().item()}')
     
     # 1. 解码得到预测列表和预测 Mask
     nodule_results, pred_mask_tensor = decode_and_print(hm_pred, size_pred, threshold=CONFIG["threshold"])
