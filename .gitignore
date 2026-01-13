@@ -139,3 +139,10 @@ tests/testing_data/*Hippocampus*
 
 # Temporary workspace
 tmp_*_dir/
+
+
+pretrained/
+wandb/
+runs/
+debug_vis/
+final_analysis/

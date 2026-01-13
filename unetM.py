@@ -17,14 +17,15 @@ import torch.nn as nn
 from torch.cuda.amp import autocast
 
 class NoduleDetectionHead(nn.Module):
-    def __init__(self, in_channels=48, hidden_channels=64):
+    def __init__(self, in_channels=48, hidden_channels=64, dropout_rate=0.1):
         super().__init__()
         
         # 1. 共享的特征提取层 (可选，用于进一步整合特征)
         self.shared_conv = nn.Sequential(
             nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(hidden_channels),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Dropout3d(p=dropout_rate)
         )
         
         # 2. 分类头 (Heatmap): 预测是否存在结节中心
@@ -111,6 +112,7 @@ class UnetrUpDecoder(nn.Module):
         upsample_kernel_size: Sequence[int] | int,
         norm_name: tuple | str,
         res_block: bool = False,
+        
     ) -> None:
         """
         Args:
@@ -197,8 +199,8 @@ class UnetM(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
         
-        self.blank_query_fusion = HierarchicalQueryFusion(self.num_queries, self.query_dim, self.feature_channels,[4,3,2,1,0],self.batch_size) # 目前我们就选择五层，全部选择
-        self.cross_scale_fusion = CrossScaleFusion(self.feature_channels, self.text_dim)
+        self.blank_query_fusion = HierarchicalQueryFusion(self.num_queries, self.query_dim, self.feature_channels,[4,3,2,1,0],self.batch_size, dropout_rate= dropout_rate) # 目前我们就选择五层，全部选择
+        self.cross_scale_fusion = CrossScaleFusion(self.feature_channels, self.text_dim, dropout_rate = dropout_rate)
         
         self.decoder5 = UnetrUpBlock(
             spatial_dims=3,
@@ -313,7 +315,7 @@ class UnetM(nn.Module):
         # self.out = UnetOutBlock(spatial_dims=3,in_channels=self.feature_channels[0],out_channels=self.out_channels) #是一个卷积层，还需要一个softmax函数
         # self.softmax = nn.Softmax(dim=1) # 对通道维度进行softmax
         self.dropout = nn.Dropout3d(p=dropout_rate)
-        self.nodule_detection_head = NoduleDetectionHead(self.feature_channels[0])
+        self.nodule_detection_head = NoduleDetectionHead(self.feature_channels[0], dropout_rate=dropout_rate)
 
         
 
@@ -357,18 +359,22 @@ class UnetM(nn.Module):
         cat4, alpha5 = self.skip5(text_fusions[0], queries_fusions[0])
         # print(f"cat4,shape: {cat4.shape}")
         dec4 = self.encoder10(cat4)
+        dec4 = self.dropout(dec4) # <--- 新增：Bottleneck 处的 Dropout
         # print(f"dec4,shape: {dec4.shape}")
         cat3,alpha4 = self.skip4(text_fusions[1], queries_fusions[1])
         # print(f"cat3,shape: {cat3.shape}")
         dec3 = self.decoder5(dec4, cat3)
+        dec3 = self.dropout(dec3) # <--- 新增：Decoder 5 处的 Dropout
         # print(f"dec3,shape: {dec3.shape}")
         cat2, alpha3 = self.skip3(text_fusions[2], queries_fusions[2])
         # print(f"cat2,shape: {cat2.shape}")
         dec2 = self.decoder4(dec3, cat2)
+        dec2 = self.dropout(dec2) # <--- 新增：Decoder 4 处的 Dropout
         # print(f"dec2,shape: {dec2.shape}")
         cat1, alpha2 = self.skip2(text_fusions[3], queries_fusions[3])
         # print(f"cat1,shape: {cat1.shape}")
         dec1 = self.decoder3(dec2, cat1)
+        dec1 = self.dropout(dec1) # <--- 新增：Decoder 3 处的 Dropout
         # print(f"dec1,shape: {dec1.shape}")
         cat0, alpha1 = self.skip1(text_fusions[4], queries_fusions[4])
         # print(f"cat0,shape: {cat0.shape}")

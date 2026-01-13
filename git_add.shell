@@ -1,0 +1,11 @@
+#!/bin/bash
+
+echo "正在执行 Git Add..."
+git add .
+
+echo "正在排除不需要的文件夹..."
+# 可以一次性 reset 多个目录
+git reset pretrained/ wandb/ runs/ debug_vis/ final_analysis.png
+
+echo "完成！现在可以执行 git commit 了。"
+git status

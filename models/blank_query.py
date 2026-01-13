@@ -125,7 +125,7 @@ class SingleScaleFusionLayer(nn.Module):
     单尺度融合层：处理特定一个尺度的特征融合
     结构：[Proj -> Flatten -> Concat] -> [CrossAttn] -> [FFN]
     """
-    def __init__(self, in_channels, embed_dim=256, num_heads=8):
+    def __init__(self, in_channels, embed_dim=256, num_heads=8, dropout_rate = 0.1):
         super().__init__()
         
         # 1. 特征投影：将不同通道数 (48/96/...) 统一映射到 embed_dim
@@ -136,15 +136,20 @@ class SingleScaleFusionLayer(nn.Module):
             embed_dim=embed_dim, 
             num_heads=num_heads, 
             batch_first=True,
-            dropout=0.1
+            dropout=dropout_rate
         )
         self.norm1 = nn.LayerNorm(embed_dim)
         
+        # 2. Dropout 层
+        self.dropout = nn.Dropout(dropout_rate)
+
         # 3. FFN (Feed Forward Network)
         self.ffn = nn.Sequential(
             nn.Linear(embed_dim, embed_dim * 4),
             nn.GELU(),
             nn.Linear(embed_dim * 4, embed_dim),
+            nn.Dropout(dropout_rate),
+            
         )
         self.norm2 = nn.LayerNorm(embed_dim)
 
@@ -173,7 +178,7 @@ class SingleScaleFusionLayer(nn.Module):
         attn_out, _ = self.cross_attn(query=query, key=kv_memory, value=kv_memory)
         
         # 残差连接 1
-        query = self.norm1(query + attn_out)
+        query = self.norm1(query + self.dropout(attn_out))
         
         # --- C. FFN 更新 (残差连接) ---
         # 残差连接 2
@@ -188,6 +193,7 @@ class HierarchicalQueryFusion(nn.Module):
                  feature_channels=[48, 96, 192, 384, 768], # 对应 x0 到 x4
                  active_layers=[4, 3, 2], # 我们可以选择只用深层，或者全部 [4,3,2,1,0]
                  batch_size: int = 1,
+                 dropout_rate = 0.1
                  ):
         super().__init__()
         
@@ -205,7 +211,7 @@ class HierarchicalQueryFusion(nn.Module):
         for layer_idx in active_layers:
             in_c = feature_channels[layer_idx]
             self.fusion_layers.append(
-                SingleScaleFusionLayer(in_channels=in_c, embed_dim=embed_dim)
+                SingleScaleFusionLayer(in_channels=in_c, embed_dim=embed_dim, dropout_rate = dropout_rate)
             )
             
         # 3. 最终输出归一化

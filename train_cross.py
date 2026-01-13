@@ -1,3 +1,5 @@
+import json # 新增
+from sklearn.model_selection import KFold # 新增
 import argparse
 from omegaconf import OmegaConf
 from gc import enable
@@ -19,8 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.data_process import get_loader
 from models.text_processor import LanguageProcessor
 from losses.detect_loss import NoduleDetectionLoss
-
-JOSN_FILE = '/home/lhr/dataset/CSTPLung/data2.json'
+# ... (保留原有的 imports, get_config, flatten_config, train, validation 函数不变) ...
 
 def get_config():
     # 1. 设置命令行参数，只保留 config 路径和命令行覆盖功能
@@ -68,11 +69,15 @@ def flatten_config(conf):
     _extract_values(conf_dict)
     return flat_args
 
+
+
+# 假设这是你的原始 JSON 路径
+ORIGINAL_JSON_FILE = '/home/lhr/dataset/CSTPLung/data2.json' 
+
 def main():
-    
     def save_checkpoint(state, filename='checkpoint.pth.tar'):
         torch.save(state, filename)
-
+ 
     def train(args, epoch, global_step, train_loader, val_loader, best_loss, scaler,no_improve_count, patience, text_processor=None):
         
         # 【关键】设置 epoch，保证每个 epoch 随机数种子不同，shuffle 结果不同
@@ -306,28 +311,25 @@ def main():
                 print("Validation step:{}, Loss:{:.4f}, Loss HeatMap:{:.4f}".format(step, total_loss, loss_dict['hm_loss'].item()))            
         return np.mean(loss_val), np.mean(loss_val_cross)
 
+
     args = get_config()
     
-
-
-
-    print(args)
-
+    # === 1. 环境初始化 (只执行一次) ===
     print("*"*50)
     print('设置环境')
     print("*"*50)
-    logdir = "./runs/" + args.logdir
+    logdir_base = "./runs/" + args.logdir # 基础日志路径
     args.amp = not args.noamp
     torch.backends.cudnn.benchmark = True
-    torch.autograd.set_detect_anomaly(True)
-
+    
     if "LOCAL_RANK" in os.environ:
         args.local_rank = int(os.environ["LOCAL_RANK"])
     else:
-        args.local_rank = 0 # 默认为 0
+        args.local_rank = 0 
+    
     if "WORLD_SIZE" in os.environ:
         args.distributed = int(os.environ["WORLD_SIZE"]) > 1
-    # args.device = "cuda:0"
+    
     args.world_size = 1
     args.rank = 0        
 
@@ -337,121 +339,161 @@ def main():
         torch.distributed.init_process_group(backend="nccl", init_method=args.dist_url)
         args.world_size = torch.distributed.get_world_size()
         args.rank = torch.distributed.get_rank()
-        print(
-            "Training in distributed mode with multiple processes, 1 GPU per process. Process %d, total %d."
-            % (args.rank, args.world_size)
-        )
     else:
         print("Training with a single process on 1 GPUs.")
-    assert args.rank >= 0
-    if args.rank == 0:
-    # 初始化 wandb
-        wandb.init(
-            project="Lung-Nodule-Seg",  # 项目名称，自己起
-            name=f"run_{args.name}",  # 实验名称
-            config=args,                # 自动记录所有的超参数
-            # mode="offline"            # 如果服务器没网，开启这个模式
-        )
-    print("*"*50)
-    print('设置显卡')
-    print("*"*50)
-
-    if args.rank == 0:
-        os.makedirs(logdir, exist_ok=True)
-        writer = SummaryWriter(logdir)
-    else:
-        writer = None
-    print("*"*50)
-    print('加载模型')
-    print("*"*50)
+    
+    # === 2. 准备交叉验证数据 (关键修改) ===
+    # 读取原始 JSON 数据
+    with open(ORIGINAL_JSON_FILE, 'r') as f:
+        full_data = json.load(f)
+        train_data_list = full_data['training'] # 获取列表部分
+        val_data_list = full_data['validation']
+    data_list = train_data_list + val_data_list
+    
+    # 定义 4折
+    n_folds = args.n_folds
+    kfold = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+    
+    # 只需要加载一次 text_processor
     text_processor = LanguageProcessor().to(args.device)
-         # drop path rate
-    model = UnetM(text_processor, batch_size=args.batch_size*args.sw_batch_size, dropout_rate = args.dropout_rate)
-    model.to(args.device)
-    # 可选：让 wandb 监控模型的梯度和参数分布
-    # model (或 model.module) 需要是 nn.Module
-    # wandb.watch(model, log="all", log_freq=100)
-    print("*"*50)
-    print('设置优化器')
-    print("*"*50)
-    if args.opt == "adam":
-        optimizer = optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
 
-    elif args.opt == "adamw":
-        optimizer = optim.AdamW(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
+    # === 3. 开始 K-Fold 循环 ===
+    # enumerate 返回 (折数, (训练索引, 验证索引))
+    for fold_idx, (train_indices, val_indices) in enumerate(kfold.split(data_list)):
+        
+        print(f"\n{'='*20} Start Fold {fold_idx + 1} / {n_folds} {'='*20}")
+        
+        # --- A. 动态生成本折的 JSON 文件 ---
+        # 只让 Rank 0 负责写文件，避免多进程冲突
+        fold_train_file = f"temp_data_fold{fold_idx}_train.json"
+        fold_val_file = f"temp_data_fold{fold_idx}_val.json"
+        
+        if args.rank == 0:
+            train_subset = [data_list[i] for i in train_indices]
+            val_subset = [data_list[i] for i in val_indices]
+            
+            # 构造符合 dataset 要求的字典结构
+            with open(fold_train_file, 'w') as f:
+                json.dump({'training': train_subset}, f)
+            with open(fold_val_file, 'w') as f:
+                json.dump({'training': val_subset}, f)
+            print(f"[Fold {fold_idx+1}] Created temporary json files.")
 
-    elif args.opt == "sgd":
-        optimizer = optim.SGD(params=model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
+        # 分布式同步：等待 Rank 0 写完文件
+        if args.distributed:
+            dist.barrier()
 
-    if args.resume:
-        model_pth = args.resume
-        model_dict = torch.load(model_pth)
-        model.load_state_dict(model_dict["state_dict"])
-        model.epoch = model_dict["epoch"]
-        model.optimizer = model_dict["optimizer"]
-    print("*"*50)
-    print('设置调度器')
-    print("*"*50)
-    if args.lrdecay:
-        if args.lr_schedule == "warmup_cosine":
-            scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
+        # --- B. 更新 args 以指向新的临时文件 ---
+        # 【注意】你需要确保你的 get_loader 函数使用 args.train_path 和 args.val_path
+        # 如果你之前的 get_loader 是硬编码读取 JOSN_FILE，请务必去修改 get_loader 
+        # 让它接受 args.train_path 参数
+        args.train_path = fold_train_file 
+        args.val_path = fold_val_file
+        
+        # 更新日志目录，区分不同 Fold
+        current_logdir = os.path.join(logdir_base, f"fold_{fold_idx+1}/")
+        if args.rank == 0:
+            os.makedirs(current_logdir, exist_ok=True)
+            # 重新初始化 Tensorboard
+            writer = SummaryWriter(current_logdir)
+            
+            # 重新初始化 WandB (使用 group 将不同 fold 归为一组)
+            # 如果是第一次循环，初始化；后续循环，重新初始化
+            if fold_idx > 0: wandb.finish() 
+            wandb.init(
+                project="Lung-Nodule-Seg-CV", 
+                name=f"{args.name}_fold_{fold_idx+1}",
+                group=f"{args.name}_CV", # 将4折归为同一个组
+                config=args,
+                reinit=True
+            )
+        else:
+            writer = None
 
-        elif args.lr_schedule == "poly":
+        # --- C. 重新初始化模型、优化器、调度器、Scaler (防止权重泄漏) ---
+        print(f'[Fold {fold_idx+1}] Re-initializing Model and Optimizer...')
+        model = UnetM(text_processor, batch_size=args.batch_size*args.sw_batch_size)
+        model.to(args.device)
+        
+        # 【重要】在这里加入 Bias 初始化 (之前讨论过的)
+        # prior_prob = 0.01
+        # bias_value = -math.log((1 - prior_prob) / prior_prob)
+        # model.heatmap_head.bias.data.fill_(bias_value)
+        
+        if args.opt == "adam":
+            optimizer = optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
+        elif args.opt == "adamw":
+            optimizer = optim.AdamW(params=model.parameters(), lr=args.lr, weight_decay=args.decay)
+        elif args.opt == "sgd":
+            optimizer = optim.SGD(params=model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.decay)
 
-            def lambdas(epoch):
-                return (1 - float(epoch) / float(args.epochs)) ** 0.9
+        # 调度器重置
+        if args.lrdecay:
+            if args.lr_schedule == "warmup_cosine":
+                scheduler = WarmupCosineSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=args.num_steps)
+            elif args.lr_schedule == "poly":
+                def lambdas(epoch):
+                    return (1 - float(epoch) / float(args.epochs)) ** 0.9
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
+        
+        # 损失函数重置
+        loss_function = NoduleDetectionLoss(1,0,10)
 
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambdas)
-    print("*"*50)
-    print('设置损失')
-    print("*"*50)
-    # loss_function = Loss1()
-    # 这里使用回归高斯热力图预测损失
-    loss_function = NoduleDetectionLoss(1,0,10)
+        # DDP 包装重置
+        if args.distributed:
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+            model = DistributedDataParallel(model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
 
+        # 数据加载器重置 (读取新的 json 文件)
+        # ！！！关键：请确保 get_loader 内部读取的是 args.train_path 和 args.val_path
+        train_loader, test_loader = get_loader(args, text_processor)
 
+        # Scaler 重置
+        if args.amp:
+            scaler = GradScaler()
+        else:
+            scaler = None
+
+        # --- D. 重置训练状态变量 ---
+        global_step = 0
+        best_val = 1e8
+        no_improve_count = 0 # 连续未提升次数
+        patience_limit = 5   # 早停阈值：5次
+        epoch = 0
+
+        # --- E. 开始训练本折 (复制原来的 while 循环) ---
+        while global_step < args.num_steps:
+            global_step, loss, best_val , no_improve ,stop_signal = train(
+                args, epoch, global_step, train_loader, test_loader, 
+                best_val, scaler, no_improve_count, patience_limit, text_processor
+            )
+            
+            if stop_signal:
+                print(f"[Fold {fold_idx+1}] Early stopping at step {global_step}")
+                break
+            epoch += 1
+        
+        # --- F. 本折结束后的清理 ---
+        # 保存本折的最佳模型和最终模型
+        if args.distributed:
+            if dist.get_rank() == 0:
+                torch.save(model.state_dict(), os.path.join(current_logdir, "final_model.pth"))
+        else:
+            torch.save(model.state_dict(), os.path.join(current_logdir, "final_model.pth"))
+        
+        # 显存清理，防止 OOM
+        del model, optimizer, scheduler, scaler, train_loader, test_loader
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[Fold {fold_idx+1}] Finished. GPU cache cleared.")
+
+    # 4折全部结束
     if args.distributed:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-        model = DistributedDataParallel(model, device_ids=[args.local_rank],output_device=args.local_rank, find_unused_parameters=True)
-    print("*"*50)
-    print('设置数据加载器')
-    print("*"*50)
-    train_loader, test_loader = get_loader(args, text_processor)
-
-    global_step = 0
-    # === 初始化早停相关变量 ===
-    best_val = 1e8
-    no_improve_count = 0 # 连续未提升次数
-    patience_limit = 5   # 早停阈值：5次
-    if args.amp:
-        scaler = GradScaler()
-    else:
-        scaler = None
-    print("*"*50)
-    print('开始训练')
-    print("*"*50)
-    # for epoch in range(args.epochs):
-    #     if global_step >= args.num_steps:
-    #         break
-    #     global_step, loss, best_val = train(args, epoch, global_step, train_loader, test_loader, best_val, scaler, text_processor)
-    epoch = 0
-    while global_step < args.num_steps:
-        # 这里的 epoch 变量只是为了传给 train 函数做 log 或者 shuffle 用
-        global_step, loss, best_val , no_improve ,stop_signal = train(args, epoch, global_step, train_loader, test_loader, best_val, scaler, no_improve_count, patience_limit, text_processor)
-        # 检查是否触发了早停
-        if stop_signal:
-            print(f"Training stopped early at Global Step {global_step}")
-            break # 跳出 while 循环，结束训练
-        epoch += 1
-    checkpoint = {"epoch": args.epochs, "state_dict": model.state_dict(), "optimizer": optimizer.state_dict()}
-
-    if args.distributed:
-        if dist.get_rank() == 0:
-            torch.save(model.state_dict(), logdir + "final_model.pth")
         dist.destroy_process_group()
-    else:
-        torch.save(model.state_dict(), logdir + "final_model.pth")
-    save_checkpoint(checkpoint, logdir + f"/{args.name}_model_final_epoch.pt")
+    
+    if args.rank == 0:
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

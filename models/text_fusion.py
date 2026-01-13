@@ -1,3 +1,4 @@
+from this import d
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -60,7 +61,7 @@ class CrossScaleFusion(nn.Module):
     K: Image Diff (Denoised)
     V: Image Sum
     """
-    def __init__(self, img_channels_list, text_dim=768):
+    def __init__(self, img_channels_list, text_dim=768, dropout_rate = 0.1):
         super().__init__()
         self.denoiser = MultiScaleConsistencyDenoise(img_channels_list)
         
@@ -68,7 +69,7 @@ class CrossScaleFusion(nn.Module):
         
         for in_c in img_channels_list:
             self.fusion_layers.append(
-                SingleScaleInteraction(img_dim=in_c, text_dim=text_dim)
+                SingleScaleInteraction(img_dim=in_c, text_dim=text_dim, dropout_rate=dropout_rate)
             )
 
     def forward(self, feat_a_list, feat_b_list, text_embedding):
@@ -100,19 +101,22 @@ class CrossScaleFusion(nn.Module):
         return text_embeddings
 
 class SingleScaleInteraction(nn.Module):
-    def __init__(self, img_dim, text_dim):
+    def __init__(self, img_dim, text_dim, dropout_rate = 0.1):
         super().__init__()
         # 投影层：将图像维度映射到文本维度
         self.k_proj = nn.Conv3d(img_dim, text_dim, kernel_size=1)
         self.v_proj = nn.Conv3d(img_dim, text_dim, kernel_size=1)
         
         # 交叉注意力
-        self.cross_attn = nn.MultiheadAttention(embed_dim=text_dim, num_heads=8, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(embed_dim=text_dim, num_heads=8, batch_first=True, dropout=dropout_rate)
         self.norm = nn.LayerNorm(text_dim)
+        self.dropout = nn.Dropout(dropout_rate)
         self.ffn = nn.Sequential(
             nn.Linear(text_dim, text_dim * 4),
             nn.GELU(),
-            nn.Linear(text_dim * 4, text_dim)
+            nn.Dropout(dropout_rate),
+            nn.Linear(text_dim * 4, text_dim),
+            nn.Dropout(dropout_rate),
         )
         self.norm_ffn = nn.LayerNorm(text_dim)
 
@@ -138,7 +142,7 @@ class SingleScaleInteraction(nn.Module):
         attn_out, _ = self.cross_attn(query=text, key=K, value=V)
         
         # 4. 残差连接 + FFN
-        text = self.norm(text + attn_out)
+        text = self.norm(text + self.dropout(attn_out))
         text = self.norm_ffn(text + self.ffn(text))
         
         return text
