@@ -248,6 +248,7 @@ class HierarchicalQueryFusion(nn.Module):
         return query_array  # [layer_nums, B, num_queries, embed_dim]
 
 
+
 def main1():
     from torch.profiler import profile, record_function, ProfilerActivity
     # 用来测试backbone加上对应的空查询的内存占用与效果运行

@@ -13,7 +13,7 @@ import os
 
 
 class LanguageProcessor(nn.Module):
-    def __init__(self, bbox_decoder=None, bert_type="bert-base-uncased", max_token = 60):
+    def __init__(self, bbox_decoder=None, bert_type="bert-base-uncased", max_token = 256):
         super().__init__()
         self.tokenizer, self.text_encoder = self.load_bert_model(bert_type, max_token)
         self.bbox_decoder = bbox_decoder

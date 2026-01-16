@@ -20,10 +20,11 @@ from monai.transforms import (
 from utils.transform import ProcessText
 
 def get_loader(args, language_processor):
-    jsonfile = args.jsonlist
+    train_fold_jsonfile = args.train_path
+    val_fold_jsonfile = args.val_path
     num_workers = args.workers
-    datalist = load_decathlon_datalist(jsonfile, True, "training")
-    vali_datalist = load_decathlon_datalist(jsonfile, True, "validation")
+    datalist = load_decathlon_datalist(train_fold_jsonfile, True, "training")
+    vali_datalist = load_decathlon_datalist(val_fold_jsonfile, True, "training")
     print("Dataset all training: number of data: {}".format(len(datalist)))
     print("Dataset all validation: number of data: {}".format(len(vali_datalist)))
     processText = ProcessText(language_processor, keys=["text"], max_len=60)

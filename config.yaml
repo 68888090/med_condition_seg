@@ -7,7 +7,7 @@ training:
   eval_num: 100                  # evaluation frequency
   warmup_steps: 500              # warmup steps
   batch_size: 1                 # number of batch size
-  sw_batch_size: 2             # number of sliding window batch size
+  sw_batch_size: 4             # number of sliding window batch size
   resume: null                   # resume training (path to checkpoint)
   loss_type: "SSL"               # loss type
   log_num: 10
@@ -28,9 +28,9 @@ data:
   b_max: 1.0
   
   # Spacing
-  space_x: 1.5
-  space_y: 1.5
-  space_z: 2.0
+  space_x: 1.0
+  space_y: 1.0
+  space_z: 1.0
   
   # ROI Size
   roi_x: 64
@@ -43,7 +43,7 @@ data:
   jsonlist: "/home/lhr/dataset/CSTPLung/data2.json"
 
 optimization:
-  lr: 4.0e-5                     # learning rate
+  lr: 4.0e-4                     # learning rate
   decay: 0.1                     # decay rate
   momentum: 0.9                  # momentum
   lrdecay: true                 # enable learning rate decay
@@ -58,9 +58,9 @@ system:
   noamp: false                    # Use Automatic Mixed Precision (注意：我将 noamp 改为了正向的 amp)
   device: "cuda:0"               # device to use for training
   distributed: false              # enable distributed training
-  workers: 4                  # number of workers for data loading
+  workers: 8                  # number of workers for data loading
   output_dir: '/home/lhr/dataset/checkpoints/swin-unetr'
 
 experiment:
 
-  name: "1_13_1"
+  name: "1_16_4"

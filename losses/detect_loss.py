@@ -125,7 +125,7 @@ class NoduleDetectionLoss(nn.Module):
         if num_pos == 0:
             loss = loss -neg_loss_sum
         else:
-            pos_weights = 10.0
+            pos_weights = 100.0
             loss = -(pos_weights * pos_loss_sum + neg_loss_sum) / num_pos
             
         return loss

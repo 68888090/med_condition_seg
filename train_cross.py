@@ -13,7 +13,9 @@ import torch.optim as optim
 import wandb
 
 from losses.loss import Loss1
-from unetM import UnetM
+# from unetM import UnetM
+# from UnetM1 import UnetM
+from new_UnetM import UnetM
 from optimizers.lr_scheduler import WarmupCosineSchedule
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel
@@ -412,7 +414,7 @@ def main():
 
         # --- C. 重新初始化模型、优化器、调度器、Scaler (防止权重泄漏) ---
         print(f'[Fold {fold_idx+1}] Re-initializing Model and Optimizer...')
-        model = UnetM(text_processor, batch_size=args.batch_size*args.sw_batch_size)
+        model = UnetM(text_processor, batch_size=args.batch_size*args.sw_batch_size, dropout_rate=args.dropout_rate)
         model.to(args.device)
         
         # 【重要】在这里加入 Bias 初始化 (之前讨论过的)
@@ -463,7 +465,7 @@ def main():
 
         # --- E. 开始训练本折 (复制原来的 while 循环) ---
         while global_step < args.num_steps:
-            global_step, loss, best_val , no_improve ,stop_signal = train(
+            global_step, loss, best_val , no_improve_count ,stop_signal = train(
                 args, epoch, global_step, train_loader, test_loader, 
                 best_val, scaler, no_improve_count, patience_limit, text_processor
             )
@@ -477,9 +479,9 @@ def main():
         # 保存本折的最佳模型和最终模型
         if args.distributed:
             if dist.get_rank() == 0:
-                torch.save(model.state_dict(), os.path.join(current_logdir, "final_model.pth"))
+                torch.save(model.state_dict(), os.path.join(current_logdir, args.name+"_final_model.pth"))
         else:
-            torch.save(model.state_dict(), os.path.join(current_logdir, "final_model.pth"))
+            torch.save(model.state_dict(), os.path.join(current_logdir, args.name+"_final_model.pth"))
         
         # 显存清理，防止 OOM
         del model, optimizer, scheduler, scaler, train_loader, test_loader

@@ -17,12 +17,14 @@ from sklearn.metrics import roc_auc_score
 
 # === 假设这些是你的自定义模块，请确保路径正确 ===
 # from utils.transform import ProcessText
-# from unetM import UnetM
+
 # from models.text_processor import LanguageProcessor
 # 为了让代码跑通，我这里保留import，实际运行时请取消注释
 try:
     from utils.transform import ProcessText
-    from unetM import UnetM
+    # from UnetM1 import UnetM
+    from new_UnetM import UnetM
+    # from unetM import UnetM
     from models.text_processor import LanguageProcessor
 except ImportError:
     print("Warning: 自定义模块导入失败，请检查路径。")
@@ -31,16 +33,16 @@ except ImportError:
 # 1. 用户配置区域
 # ==============================================================================
 CONFIG = {
-    "image1_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/fixed_104_20220613.mhd",
-    "image2_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/104_20220617.mhd",
-    "text_prompt": "Can you find nodules that appeared?",
+    "image1_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/fixed_94_20220407.mhd",
+    "image2_path": "/home/lhr/dataset/CSTPLung/data/bbox_data/94_20221025.mhd",
+    "text_prompt": "Which findings increased in size by 54?",
     "test_json_data" : "/home/lhr/dataset/CSTPLung/data2.json",
-    "checkpoint": "/home/lhr/dataset/checkpoints/swin-unetr/1_11_1_checkpoint_best.pth.tar",
+    "checkpoint": "/home/lhr/dataset/checkpoints/swin-unetr/1_16_1_checkpoint_best.pth.tar",
     "roi_size": (64, 64, 64),
     "roi_x": 64, "roi_y": 64, "roi_z": 64,
     "sw_batch_size": 4,
     "overlap": 0.5,
-    "threshold": 0.1,  # 验证时阈值设低一点，方便计算 Recall
+    "threshold": 0.4,  # 验证时阈值设低一点，方便计算 Recall
     "device": "cuda:0"
 }
 
@@ -302,7 +304,8 @@ def main():
     
     model = UnetM(text_processor, batch_size=1).to(device)
     checkpoint = torch.load(CONFIG["checkpoint"], map_location=device)
-    state_dict = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()} if 'state_dict' in checkpoint else checkpoint
+    # state_dict = {k.replace("module.", ""): v for k, v in checkpoint['state_dict'].items()} if 'state_dict' in checkpoint else checkpoint
+    state_dict = checkpoint['state_dict']
     model.load_state_dict(state_dict)
     model.eval()
     
