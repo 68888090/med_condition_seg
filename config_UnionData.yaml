@@ -6,8 +6,8 @@ training:
   num_steps: 100000              # number of training iterations
   eval_num: 100                  # evaluation frequency
   warmup_steps: 500              # warmup steps
-  batch_size: 1                 # number of batch size
-  sw_batch_size: 4             # number of sliding window batch size
+  batch_size: 16                 # number of batch size
+  sw_batch_size: 1             # number of sliding window batch size
   resume: null                   # resume training (path to checkpoint)
   loss_type: "SSL"               # loss type
   log_num: 10
@@ -40,7 +40,7 @@ data:
   # Caching (Mutual exclusive usually, but listed here)
   smartcache_dataset: false      # use monai smartcache Dataset
   cache_dataset: false           # use monai cache Dataset
-  jsonlist: "/home/lhr/dataset/CSTPLung/data2.json"
+  jsonlist: "/home/lhr/dataset/Union_for_lx_Rigid_lung_mask_Crop_64mm_Rigid/train_dataloader.json"
 
 optimization:
   lr: 4.0e-4                     # learning rate
@@ -62,5 +62,5 @@ system:
   output_dir: '/home/lhr/dataset/checkpoints/swin-unetr'
 
 experiment:
-
-  name: "1_17_1"
+  project: "UnionData"
+  name: "1_17_2"

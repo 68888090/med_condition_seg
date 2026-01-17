@@ -21,7 +21,7 @@ class NoduleDetectionHead(nn.Module):
     def __init__(self, in_channels=48, hidden_channels=64, dropout_rate=0.1):
         super().__init__()
         
-        # 1. 共享的特征提取层 (可选，用于进一步整合特征)
+        # 1. 共享特征提取
         self.shared_conv = nn.Sequential(
             nn.Conv3d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm3d(hidden_channels),
@@ -29,59 +29,43 @@ class NoduleDetectionHead(nn.Module):
             nn.Dropout3d(p=dropout_rate)
         )
         
-        # 2. 分类头 (Heatmap): 预测是否存在结节中心
-        # 输出 (B, 1, D, H, W)
-        self.heatmap_head = nn.Conv3d(hidden_channels, 1, kernel_size=1, bias=True)
-        # 注意：这里先不加 Sigmoid，通常放在 Loss 计算或推理时加，为了数值稳定性
+        # ================== 修改点：双头输出 ==================
         
-        # 3. 偏移头 (Offset): 预测 (delta_z, delta_y, delta_x)
-        # 输出 (B, 3, D, H, W)
-        self.offset_head = nn.Conv3d(hidden_channels, 3, kernel_size=1, bias=True)
+        # 2. Main Head (文本条件分割) -> 对应 label_final (可能全黑)
+        self.main_seg_head = nn.Conv3d(hidden_channels, 1, kernel_size=1)
         
-        # 4. 尺寸头 (Diameter): 预测直径 d
-        # 输出 (B, 1, D, H, W)
-        self.size_head = nn.Conv3d(hidden_channels, 1, kernel_size=1, bias=True)
+        # 3. Aux Head (基础目标分割) -> 对应 label_object (永远有结节)
+        # 这是一个辅助分支，专门用来保证"不管文不文本，先给我把结节抠出来"
+        self.aux_seg_head = nn.Conv3d(hidden_channels, 1, kernel_size=1)
 
-        prior_prob = 0.01
-        bias_value = -math.log((1 - prior_prob) / prior_prob)
-        self.heatmap_head.bias.data.fill_(bias_value)
-        self.heatmap_head.weight.data.normal_(std=0.001)
+        # 4. 其他检测头 (Offset, Diameter) 属于 Main 任务，只对 Final Mask 有效
+        self.offset_head = nn.Conv3d(hidden_channels, 3, kernel_size=1)
+        self.size_head = nn.Conv3d(hidden_channels, 1, kernel_size=1)
 
-        
-    @autocast(enabled=False)
+        # 初始化偏置 (防止训练初期 loss 爆炸)
+        for head in [self.main_seg_head, self.aux_seg_head]:
+            prior_prob = 0.01
+            bias_value = -math.log((1 - prior_prob) / prior_prob)
+            head.bias.data.fill_(bias_value)
+
     def forward(self, x):
-        x = x.float()
-        # 0. 检查输入是否正常
-        if torch.isnan(x).any() or torch.isinf(x).any():
-            print("Error: Input x contains NaN or Inf!")
-
         feature = self.shared_conv(x)
         
-        # 1. 检查共享特征层
-        if torch.isnan(feature).any():
-            print("Error: NaN generated in shared_conv")
-
-        # --- Head 1: Probability ---
-        heatmap = self.heatmap_head(feature)
+        # 输出两个 Mask Logits
+        main_logits = self.main_seg_head(feature) # 最终预测
+        aux_logits = self.aux_seg_head(feature)   # 辅助预测
         
-        # --- Head 2: Center Offset ---
+        # 检测任务通常只针对 Main 结果有效
         offset_logits = self.offset_head(feature)
         offset = torch.sigmoid(offset_logits)
         
-        # --- Head 3: Diameter ---
         size_logits = self.size_head(feature)
-        # 2. 这里的 softplus 最容易导致数值问题
         size_logits = torch.clamp(size_logits, min=-20.0, max=20.0)
         diameter = torch.nn.functional.softplus(size_logits)
 
-        # 3. 检查输出
-        if torch.isnan(diameter).any() or torch.isinf(diameter).any():
-            print("Error: NaN/Inf generated in diameter head")
-            # 打印一下导致溢出的原始值
-            print("Max value in size_logits:", size_logits.max())
-
-        return heatmap, offset, diameter
-
+        # 返回四个值：主Mask, 辅Mask, 偏移, 直径
+        return main_logits, aux_logits, offset, diameter
+        
 class UnetrUpDecoder(nn.Module):
     """
     An upsampling module that can be used for UNETR: "Hatamizadeh et al.,
@@ -300,10 +284,14 @@ class UnetM(nn.Module):
         dec0 = self.dropout(dec0) # <--- Dropout
         
         # Head
-        out = self.nodule_detection_head(dec0)
+        main_logits, aux_logits, offset, diameter = self.nodule_detection_head(dec0)
 
-        # 返回 alphas 占位符 (因为新的融合模块不产出 attention alpha)
-        # 为了兼容你的训练循环日志代码，返回全0的dummy list
-        dummy_alphas = [torch.zeros(1) for _ in range(5)]
+        out = {
+            "main_logits": main_logits,
+            "aux_logits": aux_logits,
+            "offset": offset,
+            "diameter": diameter
+        }
         
-        return out, dummy_alphas
+        
+        return out
