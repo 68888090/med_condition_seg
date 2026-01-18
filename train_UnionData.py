@@ -25,6 +25,7 @@ from utils.mask_data_process import get_loader
 from utils.metrics import compute_segmentation_metrics
 from models.text_processor import LanguageProcessor
 
+TEMP_JSON_PATH = "/home/lhr/item/Swin-UNETR/temp_json/"
 def get_config():
     parser = argparse.ArgumentParser(description="PyTorch Training with YAML")
     parser.add_argument("-c", "--config", default="config_UnionData.yaml", help="Path to config file")
@@ -171,10 +172,11 @@ def main():
                     val_metrics = validation(args, val_loader)
                     # val_metrics returns (avg_total_loss, avg_main_loss)
                     # 提取主要指标
-                    loss_val = val_metrics["loss"]
-                    dice_val = val_metrics["dice"]
+                    loss_val = val_metrics["all_loss"]
+                    dice_all = val_metrics["all_dice"]
+                    dice_pos = val_metrics["pos_dice"]
                     
-                    print(f"\n[Validation] Loss: {loss_val:.4f} | Dice: {dice_val:.4f} | Recall: {val_metrics['recall']:.4f}")
+                    print(f"\n[Validation] Loss: {loss_val:.4f} | Dice: {dice_all:.4f} | Pos Dice: {dice_pos:.4f} | Recall: {val_metrics['recall']:.4f}")
                     
                     # === WandB 播送所有指标 ===
                     wandb_log_dict = {f"val/{k}": v for k, v in val_metrics.items()}
@@ -222,18 +224,19 @@ def main():
     # =================================================================================
     def validation(args, test_loader):
         model.eval()
-        metrics_meter = {
-            "loss": [],
-            "loss_main": [],
-            "loss_aux": [],
-            "dice": [],
-            "iou": [],
-            "recall": [],
-            "precision": []
+        
+        # 定义两个累加器：一个存全体，一个只存正样本
+        meters = {
+            "all": {k: [] for k in ["loss", "dice", "iou", "recall", "precision"]},
+            "pos": {k: [] for k in ["dice", "iou", "recall", "precision"]} # 正样本不需要看 Loss，看指标就行
         }
         
+        # 获取验证目标 (默认 main)
+        val_target = getattr(args, 'val_target', 'main')
+
         with torch.no_grad():
             for step, batch in enumerate(test_loader):
+                # 1. 数据准备
                 ct1 = batch["CT1_path"].to(args.device)
                 ct2 = batch["CT2_path"].to(args.device)
                 target_mask = batch["label"].to(args.device)
@@ -246,34 +249,64 @@ def main():
 
                 with autocast(enabled=args.amp):
                     outputs = model(ct1, ct2, text)
-                    main_logits = outputs['main_logits']
-                    aux_logits = outputs['aux_logits']
+                    main_logits, aux_logits, _, _, _ = outputs
+                    
+                    # 计算 Loss (Loss 依然是对全体数据算的)
                     gt_reg = None
                     loss_dict = loss_function(outputs, target_mask, is_text_match, gt_reg)
+                
+                # 2. 确定用于计算指标的 Logits 和 GT
+                if val_target == 'aux':
+                    pred_logits = aux_logits
+                    gt_final = target_mask # Aux 任务永远看真实结节
+                else:
+                    pred_logits = main_logits
+                    B = target_mask.shape[0]
+                    condition_weight = is_text_match.view(B, 1, 1, 1, 1).type_as(target_mask)
+                    gt_final = target_mask * condition_weight # 文本不符则全黑
+
+                # =================== 【指标计算 A: 全体样本】 ===================
+                metrics_all = compute_segmentation_metrics(pred_logits, gt_final)
+                
+                meters["all"]["loss"].append(loss_dict['loss'].item())
+                for k in metrics_all:
+                    meters["all"][k].append(metrics_all[k])
+
+                # =================== 【指标计算 B: 仅正样本 (Satisfy=True)】 ===================
+                # 筛选出 is_text_match == 1 的索引
+                pos_indices = (is_text_match > 0.5)
+                
+                if pos_indices.sum() > 0: # 只有当 Batch 里有正样本时才计算
+                    # 关键操作：切片 (Slicing)
+                    pred_pos = pred_logits[pos_indices]
+                    gt_pos = gt_final[pos_indices]
                     
-                B = target_mask.shape[0]
-                condition_weight = is_text_match.view(B, 1, 1, 1, 1).type_as(target_mask)
-                target_final = target_mask * condition_weight # 真实的 Main GT
-
-                batch_metrics = compute_segmentation_metrics(main_logits, target_final)
+                    metrics_pos = compute_segmentation_metrics(pred_pos, gt_pos)
+                    
+                    for k in metrics_pos:
+                        meters["pos"][k].append(metrics_pos[k])
                 
-                # 5. 记录数据
-                metrics_meter["loss"].append(loss_dict['loss'].item())
-                metrics_meter["loss_main"].append(loss_dict['loss_main'].item())
-                metrics_meter["loss_aux"].append(loss_dict['loss_aux'].item())
-                metrics_meter["dice"].append(batch_metrics["dice"])
-                metrics_meter["iou"].append(batch_metrics["iou"])
-                metrics_meter["recall"].append(batch_metrics["recall"])
-                metrics_meter["precision"].append(batch_metrics["precision"])
-                
+                # 打印日志 (每10步)
                 if step % 10 == 0:
-                     print(f"Val Step {step}, Loss: {loss_dict['loss'].item():.4f}, Dice: {batch_metrics['dice']:.4f}, IoU: {batch_metrics['iou']:.4f}")
+                    # 尝试获取当前的 Positive Dice，如果没有则显示 0
+                    curr_pos_dice = meters["pos"]["dice"][-1] if len(meters["pos"]["dice"]) > 0 else 0.0
+                    print(f"Val Step {step} [{val_target.upper()}]: Loss={loss_dict['loss'].item():.4f} | All_Dice={metrics_all['dice']:.4f} | Pos_Dice={curr_pos_dice:.4f}")
 
-        # 6. 计算平均值
-        avg_metrics = {k: np.mean(v) for k, v in metrics_meter.items()}
+        # 3. 汇总平均值
+        avg_metrics = {}
         
-        return avg_metrics # 返回字典
+        # 汇总 All
+        for k, v in meters["all"].items():
+            avg_metrics[f"all_{k}"] = np.mean(v)
+            
+        # 汇总 Pos (注意处理空列表的情况，防止报错)
+        for k, v in meters["pos"].items():
+            if len(v) > 0:
+                avg_metrics[f"pos_{k}"] = np.mean(v)
+            else:
+                avg_metrics[f"pos_{k}"] = 0.0 # 如果验证集全是负样本
 
+        return avg_metrics
     # =================================================================================
     # Main Setup
     # =================================================================================
@@ -333,6 +366,11 @@ def main():
         fold_train_file = f"{args.name}_temp_data_fold{fold_idx}_train.json"
         fold_val_file = f"{args.name}_temp_data_fold{fold_idx}_val.json"
         
+        # 确保目录存在
+        os.makedirs(TEMP_JSON_PATH, exist_ok=True)
+        fold_train_file = os.path.join(TEMP_JSON_PATH, fold_train_file)
+        fold_val_file = os.path.join(TEMP_JSON_PATH, fold_val_file)
+
         if args.rank == 0:
             train_subset = [data_list[i] for i in train_indices]
             val_subset = [data_list[i] for i in val_indices]
@@ -365,7 +403,7 @@ def main():
         # Model Init
         print(f'[Fold {fold_idx+1}] Re-initializing Model...')
         # 注意：这里不需要传入 sw_batch_size 了，因为没有 Crop，batch_size 就是 args.batch_size
-        model = UnetM(text_processor, batch_size=args.batch_size, dropout_rate=args.dropout_rate)
+        model = UnetM(text_processor, batch_size=args.batch_size, dropout_rate=args.dropout_rate, fusion_mode=args.fusion_mode)
         model.to(args.device)
         
         if args.opt == "adam":
@@ -378,9 +416,9 @@ def main():
         
         # === 【修改 5】 Loss Init ===
         loss_function = TextGuidedHybridLoss(
-            lambda_main=1.0, 
-            lambda_aux=0.4, 
-            lambda_reg=0.0 # 暂时不训练回归，设为 0
+            lambda_main=args.main_loss_weight, 
+            lambda_aux=args.aux_loss_weight, 
+            lambda_reg=args.reg_loss_weight # 暂时不训练回归，设为 0
         ).to(args.device)
 
         if args.distributed:

@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from collections.abc import Sequence
 import numpy as np
-# from models.spatial_fusion1 import HybridFusionModule
-# from models.new_spatial_fusion import HybridFusionModule
-from models.gate_modal_fusion import HybridFusionModule
+
+
+
 # 使用最新的机制尝试
 from models.image_backbone import SwinTransformerBackbone
 from models.text_processor import LanguageProcessor
@@ -149,8 +149,21 @@ class UnetM(nn.Module):
         patch_size: int = 2,
         batch_size: int = 1,
         dropout_rate: float = 0.2, # <--- 建议调高到 0.2
+
+        # 下面是实验模块变换部分
+        fusion_mode: str = "prior_guide"
     ):
         super().__init__()
+
+        if fusion_mode == "prior_guide":
+            from models.gate_modal_fusion import HybridFusionModule
+        elif fusion_mode == "simple_gate":
+            from models.new_spatial_fusion import HybridFusionModule
+        elif fusion_mode == "attention":
+            from models.spatial_fusion1 import HybridFusionModule
+
+
+
         self.feature_channels = feature_channels
         self.text_dim = text_dim
         self.patch_size = patch_size

@@ -150,10 +150,6 @@ class DensePixelTextLayer(nn.Module):
 # 3. 集成模块 (Integrated Module)
 # ==========================================
 
-# ==========================================
-# 3. 集成模块 (Integrated Module)
-# ==========================================
-
 class HybridFusionModule(nn.Module):
     def __init__(self, 
                  # 1. 图像塔配置 (比较窄，为了省显存)

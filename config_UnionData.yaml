@@ -6,12 +6,17 @@ training:
   num_steps: 100000              # number of training iterations
   eval_num: 100                  # evaluation frequency
   warmup_steps: 500              # warmup steps
-  batch_size: 16                 # number of batch size
+  batch_size: 12                 # number of batch size
   sw_batch_size: 1             # number of sliding window batch size
   resume: null                   # resume training (path to checkpoint)
   loss_type: "SSL"               # loss type
   log_num: 10
-  n_folds: 4
+  n_folds: 10
+  patience: 1000
+  main_loss_weight: 1.0
+  aux_loss_weight: 0.4
+  reg_loss_weight: 0.0
+  val_target: "main"  # “main / "aux"
 
 model:
   in_channels: 1                 # number of input channels
@@ -19,6 +24,7 @@ model:
   dropout_rate: 0.2         # drop path rate
   spatial_dims: 3                # spatial dimension of input data
   use_checkpoint: false          # use gradient checkpointing to save memory
+  fusion_mode: "prior_guide"     # "prior_guide" / "simple_gate" / "attention"
 
 data:
   # Intensity Scaling
@@ -63,4 +69,4 @@ system:
 
 experiment:
   project: "UnionData"
-  name: "1_17_2"
+  name: "1_18_2"

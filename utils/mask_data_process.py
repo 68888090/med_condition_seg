@@ -94,7 +94,7 @@ def get_loader(args, language_processor):
             RandFlipd(keys=["CT1_path", "CT2_path", "label"], prob=0.5, spatial_axis=2),
             RandRotate90d(keys=["CT1_path", "CT2_path", "label"], prob=0.5, max_k=3),
             
-            ToTensord(keys=["CT1_path", "CT2_path", "label", "text"]),
+            ToTensord(keys=["CT1_path", "CT2_path", "label", "text", "satisfy"]),
         ]
     )
     
@@ -119,7 +119,7 @@ def get_loader(args, language_processor):
             SpatialPadd(keys=["CT1_path", "CT2_path", "label"], spatial_size=target_roi_size),
             CenterSpatialCropd(keys=["CT1_path", "CT2_path", "label"], roi_size=target_roi_size),
             
-            ToTensord(keys=["CT1_path", "CT2_path", "label", "text"]),
+            ToTensord(keys=["CT1_path", "CT2_path", "label", "text", "satisfy"]),
         ]
     )
 

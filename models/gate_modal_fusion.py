@@ -91,10 +91,6 @@ class PriorGuidedGatedAttentionLayer(nn.Module):
         
         return self.fusion_act(self.fusion_norm(f_fused))
 
-# -------------------------------------------------------------------
-# 下面是保持不变的浅层模块和整合后的混合模块
-# -------------------------------------------------------------------
-
 class SimpleGateLayer(nn.Module):
     """
     【浅层专用：全局门控】(保持不变)

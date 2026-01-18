@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from collections.abc import Sequence
 import numpy as np
-# from models.spatial_fusion1 import HybridFusionModule
+from models.spatial_fusion1 import HybridFusionModule
 # from models.new_spatial_fusion import HybridFusionModule
-from models.gate_modal_fusion import HybridFusionModule
+# from models.gate_modal_fusion import HybridFusionModule
 # 使用最新的机制尝试
 from models.image_backbone import SwinTransformerBackbone
 from models.text_processor import LanguageProcessor
