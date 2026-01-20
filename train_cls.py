@@ -14,9 +14,9 @@ import wandb
 
 # === 【修改 1】导入新的 Loss ===
 # 假设你把刚才那个损失函数保存为了 losses/hybrid_loss.py
-from losses.mask_loss import TextGuidedHybridLoss 
+from losses.text_condition_loss import TextGuidedHybridLoss 
 
-from UnetM_UnionData import UnetM
+from cls_UnetM import UnetM
 from optimizers.lr_scheduler import WarmupCosineSchedule
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel
@@ -28,7 +28,7 @@ from models.text_processor import LanguageProcessor
 TEMP_JSON_PATH = "/home/lhr/item/Swin-UNETR/temp_json/"
 def get_config():
     parser = argparse.ArgumentParser(description="PyTorch Training with YAML")
-    parser.add_argument("-c", "--config", default="config_UnionData.yaml", help="Path to config file")
+    parser.add_argument("-c", "--config", default="config_cls.yaml", help="Path to config file")
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER, 
                         help="Modify config options from command line")
     args = parser.parse_args()
@@ -51,6 +51,8 @@ def flatten_config(conf):
     _extract_values(conf_dict)
     return flat_args
 
+
+
 # 假设这是你的原始 JSON 路径
 ORIGINAL_JSON_FILE = '/home/lhr/dataset/Union_for_lx_Rigid_lung_mask_Crop_64mm_Rigid/dataset.json' 
 
@@ -61,7 +63,7 @@ def main():
     # =================================================================================
     # Train Loop
     # =================================================================================
-    def train(args, epoch, global_step, train_loader, val_loader, best_loss, scaler, no_improve_count, patience, text_processor=None):
+    def train(args, epoch, global_step, train_loader, val_loader, best_loss, best_dice, scaler, no_improve_count, patience, text_processor=None):
         
         if args.distributed and hasattr(train_loader.sampler, 'set_epoch'):
             train_loader.sampler.set_epoch(epoch)
@@ -109,6 +111,38 @@ def main():
                 gt_reg = None 
                 
                 loss_dict = loss_function(outputs, target_mask, is_text_match, gt_reg)
+                # ================= [Debug 探针 START] =================
+                # if step % 10 == 0 and args.rank == 0:
+                #     print(f"\n====== DEBUG STEP {step} ======")
+                    
+                #     # 1. 检查输入范围 (Swin 极其敏感!)
+                #     print(f"[Input Data] Shape: {ct1.shape}")
+                #     print(f"   CT1: min={ct1.min().item():.2f}, max={ct1.max().item():.2f}, mean={ct1.mean().item():.2f}")
+                #     # 正常情况应该是 min>=0, max<=1 (或者 -1 到 1)。如果看到 -1000，必死无疑。
+
+                #     # 2. 检查 Label 是否有内容 (防止空跑)
+                #     mask_sum = target_mask.sum().item()
+                #     print(f"[Label] Sum (Pixels): {mask_sum:.2f}")
+                #     if mask_sum == 0:
+                #         print("   ⚠️ WARNING: This batch has NO nodules (All background)!")
+
+                #     # 3. 检查 Aux Head 的输出 (看模型是否“活着”)
+                #     # 检查输出的 Logits 是否全是一样的数
+                #     aux_out = outputs['aux_logits']
+                #     print(f"[Model Output] Aux Logits: min={aux_out.min().item():.4f}, max={aux_out.max().item():.4f}")
+                    
+                #     # 4. 检查梯度 (看是否断开)
+                #     # 此时还没有 backward，我们需要手动试一下 backward (仅测试用)
+                #     # 注意：这会轻微影响这次迭代的计算图，正式跑的时候去掉下面这几行
+                #     # test_loss = loss_dict['loss']
+                #     # test_loss.backward(retain_graph=True)
+                #     # if model.module.nodule_detection_head.aux_seg_head.weight.grad is not None:
+                #     #     grad_norm = model.module.nodule_detection_head.aux_seg_head.weight.grad.norm().item()
+                #     #     print(f"[Gradient] Aux Head Grad Norm: {grad_norm:.6f}")
+                #     # else:
+                #     #     print("   ⚠️ ERROR: No gradient on Aux Head!")
+                #     # optimizer.zero_grad() # 清空测试梯度
+                # # ================= [Debug 探针 END] =================
                 total_loss = loss_dict["loss"]
                 
                 # =================== 防爆显存逻辑 ===================
@@ -170,45 +204,51 @@ def main():
                 
                 if args.rank == 0:
                     val_metrics = validation(args, val_loader)
-                    # val_metrics returns (avg_total_loss, avg_main_loss)
-                    # 提取主要指标
+                    
                     loss_val = val_metrics["all_loss"]
-                    dice_all = val_metrics["all_dice"]
-                    dice_pos = val_metrics["pos_dice"]
                     
-                    print(f"\n[Validation] Loss: {loss_val:.4f} | Dice: {dice_all:.4f} | Pos Dice: {dice_pos:.4f} ")
+                    # 【修改点 1】获取关键指标 Gated Dice
+                    # 如果没有 gated 指标 (比如 aux 任务)，退化为 all_dice
+                    dice_gated = val_metrics.get("gated_dice", val_metrics["all_dice"])
+                    dice_pos = val_metrics.get("pos_dice", 0.0)
                     
-                    # === WandB 播送所有指标 ===
+                    print(f"\n[Validation] Loss: {loss_val:.4f} | Gated Dice: {dice_gated:.4f} (Best: {best_dice:.4f})")
+                    
+                    # WandB Logging
                     wandb_log_dict = {f"val/{k}": v for k, v in val_metrics.items()}
                     wandb_log_dict["global_step"] = global_step
                     wandb.log(wandb_log_dict)
 
-                    # === 早停逻辑 (Early Stopping) ===
-                    # 你可以选择用 Loss 早停，也可以用 Dice 早停（推荐用 Dice，因为 Loss 有时和指标不完全对齐）
-                    # 这里为了稳妥，我们还是用 Loss 早停，但保存 Best Dice 模型
-                    
+                    # === 早停逻辑 (依然基于 Loss，防止过拟合) ===
+                    # 通常早停看 Loss 比较稳，但保存模型看 Dice
                     if loss_val < best_loss:
                         best_loss = loss_val
                         no_improve_count = 0
-                        # 保存 Loss 最低的模型
+                        # 保存最佳 Loss 模型
                         save_checkpoint({
                             'step': global_step,
                             'state_dict': model.state_dict(),
                             'optimizer': optimizer.state_dict(),
-                        }, filename=os.path.join(args.output_dir, args.name+'_best_loss.pth'))
+                            'metric': loss_val
+                        }, filename=os.path.join(args.output_dir, args.name+'_best_loss.pth.tar'))
                         print(f"Saved Best Loss Model!")
                     else:
                         no_improve_count += 1
-                        print(f"No improvement. Counter: {no_improve_count}/{patience}")
+                        print(f"No improvement in Loss. Counter: {no_improve_count}/{patience}")
                         if no_improve_count >= patience:
                             print(f"Early Stopping Triggered!")
                             should_stop += 1
-                    # if dice_val > best_dice:
-                    #     best_dice = dice_val
-                    #     save_checkpoint({
-                    #         'state_dict': model.state_dict(),
-                    #     }, filename=os.path.join(args.output_dir, args.name+'_best_dice.pth'))
-                    #     print(f"Saved Best Dice Model! ({dice_val:.4f})")
+                    
+                    # === 【修改点 2】保存最佳 Gated Dice 模型 ===
+                    if dice_gated > best_dice:
+                        best_dice = dice_gated
+                        save_checkpoint({
+                            'step': global_step,
+                            'state_dict': model.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'metric': best_dice
+                        }, filename=os.path.join(args.output_dir, args.name+'_best_gated_dice.pth.tar'))
+                        print(f"!!! Saved Best Gated Dice Model! ({best_dice:.4f}) !!!")
 
                 if args.distributed:
                     dist.broadcast(should_stop, src=0)
@@ -217,7 +257,8 @@ def main():
                     stop_signal = True
                     break 
 
-        return global_step, np.mean(loss_train), best_loss, no_improve_count, stop_signal
+        # 【修改点 3】返回值增加 best_dice
+        return global_step, np.mean(loss_train), best_loss, best_dice, no_improve_count, stop_signal
 
     # =================================================================================
     # Validation Loop
@@ -225,10 +266,11 @@ def main():
     def validation(args, test_loader):
         model.eval()
         
-        # 定义两个累加器：一个存全体，一个只存正样本
+        # 1. 定义累加器：增加 'gated' 组
         meters = {
             "all": {k: [] for k in ["loss", "dice", "iou", "recall", "precision"]},
-            "pos": {k: [] for k in ["dice", "iou", "recall", "precision"]} # 正样本不需要看 Loss，看指标就行
+            "pos": {k: [] for k in ["dice", "iou", "recall", "precision"]}, # 正样本指标
+            "gated": {k: [] for k in ["dice", "iou", "recall", "precision"]} # 【新增】门控指标
         }
         
         # 获取验证目标 (默认 main)
@@ -249,13 +291,18 @@ def main():
 
                 with autocast(enabled=args.amp):
                     outputs = model(ct1, ct2, text)
-                    main_logits, aux_logits = outputs["main_logits"],outputs["aux_logits"]
                     
-                    # 计算 Loss (Loss 依然是对全体数据算的)
+                    # 2. 解包输出 (根据你的模型返回是字典还是元组，这里保持和你输入一致的字典风格)
+                    # 务必确保你的 forward 函数返回了 match_logits
+                    main_logits = outputs["main_logits"]
+                    aux_logits = outputs["aux_logits"]
+                    match_logits = outputs["match_logits"] # 【新增】获取分类头输出
+                    
+                    # 计算 Loss
                     gt_reg = None
                     loss_dict = loss_function(outputs, target_mask, is_text_match, gt_reg)
                 
-                # 2. 确定用于计算指标的 Logits 和 GT
+                # 3. 确定用于计算指标的 Logits 和 GT
                 if val_target == 'aux':
                     pred_logits = aux_logits
                     gt_final = target_mask # Aux 任务永远看真实结节
@@ -265,19 +312,43 @@ def main():
                     condition_weight = is_text_match.view(B, 1, 1, 1, 1).type_as(target_mask)
                     gt_final = target_mask * condition_weight # 文本不符则全黑
 
-                # =================== 【指标计算 A: 全体样本】 ===================
+                # =================== 【指标计算 A: 全体样本 (Raw)】 ===================
                 metrics_all = compute_segmentation_metrics(pred_logits, gt_final)
                 
                 meters["all"]["loss"].append(loss_dict['loss'].item())
                 for k in metrics_all:
                     meters["all"][k].append(metrics_all[k])
 
-                # =================== 【指标计算 B: 仅正样本 (Satisfy=True)】 ===================
+                # =================== 【指标计算 B: 门控推理 (Gated)】 ===================
+                # 只有在验证 Main 任务时，Gating 才有意义
+                if val_target == 'main':
+                    # A. 计算分类概率
+                    match_prob = torch.sigmoid(match_logits) # [B, 1]
+                    
+                    # B. 生成门控信号 (阈值 0.5)
+                    # 如果概率 > 0.5，gate=1 (保留)；否则 gate=0 (抑制)
+                    B = main_logits.shape[0]
+                    gate = (match_prob > 0.5).float().view(B, 1, 1, 1, 1)
+                    
+                    # C. 应用门控
+                    # 如果 gate=1，保持原值；如果 gate=0，设为极小负数 (-1e9)，Sigmoid后即为0
+                    gated_logits = main_logits * gate + (1 - gate) * -1.0e9
+                    
+                    # D. 计算指标 (使用 Gated Logits 和 真实的 GT)
+                    metrics_gated = compute_segmentation_metrics(gated_logits, gt_final)
+                    
+                    for k in metrics_gated:
+                        meters["gated"][k].append(metrics_gated[k])
+                else:
+                    # 如果是 aux 任务，gated 指标没意义，可以直接填 0 或者复制 all
+                    for k in meters["gated"]: meters["gated"][k].append(0.0)
+
+                # =================== 【指标计算 C: 仅正样本 (Pos Only)】 ===================
                 # 筛选出 is_text_match == 1 的索引
                 pos_indices = (is_text_match > 0.5)
                 
                 if pos_indices.sum() > 0: # 只有当 Batch 里有正样本时才计算
-                    # 关键操作：切片 (Slicing)
+                    # 切片 (Slicing)
                     pred_pos = pred_logits[pos_indices]
                     gt_pos = gt_final[pos_indices]
                     
@@ -288,23 +359,21 @@ def main():
                 
                 # 打印日志 (每10步)
                 if step % 10 == 0:
-                    # 尝试获取当前的 Positive Dice，如果没有则显示 0
                     curr_pos_dice = meters["pos"]["dice"][-1] if len(meters["pos"]["dice"]) > 0 else 0.0
-                    print(f"Val Step {step} [{val_target.upper()}]: Loss={loss_dict['loss'].item():.4f} | All_Dice={metrics_all['dice']:.4f} | Pos_Dice={curr_pos_dice:.4f}")
+                    curr_gated_dice = meters["gated"]["dice"][-1] if len(meters["gated"]["dice"]) > 0 else 0.0
+                    print(f"Val Step {step} [{val_target.upper()}]: Loss={loss_dict['loss']:.4f} | Raw_Dice={metrics_all['dice']:.4f} | Gated_Dice={curr_gated_dice:.4f} | Pos_Dice={curr_pos_dice:.4f}")
 
-        # 3. 汇总平均值
+        # 4. 汇总平均值
         avg_metrics = {}
         
-        # 汇总 All
-        for k, v in meters["all"].items():
-            avg_metrics[f"all_{k}"] = np.mean(v)
-            
-        # 汇总 Pos (注意处理空列表的情况，防止报错)
-        for k, v in meters["pos"].items():
-            if len(v) > 0:
-                avg_metrics[f"pos_{k}"] = np.mean(v)
-            else:
-                avg_metrics[f"pos_{k}"] = 0.0 # 如果验证集全是负样本
+        # 遍历所有组 (all, pos, gated)
+        for group in meters:
+            for k, v in meters[group].items():
+                key_name = f"{group}_{k}"
+                if len(v) > 0:
+                    avg_metrics[key_name] = np.mean(v)
+                else:
+                    avg_metrics[key_name] = 0.0 # 防止空列表报错
 
         return avg_metrics
     # =================================================================================
@@ -418,7 +487,8 @@ def main():
         loss_function = TextGuidedHybridLoss(
             lambda_main=args.main_loss_weight, 
             lambda_aux=args.aux_loss_weight, 
-            lambda_reg=args.reg_loss_weight # 暂时不训练回归，设为 0
+            lambda_reg=args.reg_loss_weight, # 暂时不训练回归，设为 0
+            lambda_cls=args.cls_loss_weight
         ).to(args.device)
 
         if args.distributed:
@@ -435,13 +505,14 @@ def main():
         global_step = 0
         best_val = 1e8
         no_improve_count = 0 
+        best_dice = -1.0
         patience_limit = args.patience if hasattr(args, 'patience') else 10
         epoch = 0
 
         while global_step < args.num_steps:
-            global_step, loss, best_val , no_improve_count ,stop_signal = train(
+            global_step, loss, best_val ,best_dice ,no_improve_count ,stop_signal = train(
                 args, epoch, global_step, train_loader, test_loader, 
-                best_val, scaler, no_improve_count, patience_limit, text_processor
+                best_val, best_dice, scaler, no_improve_count, patience_limit, text_processor
             )
             
             if stop_signal:

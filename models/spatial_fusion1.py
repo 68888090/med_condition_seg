@@ -111,9 +111,6 @@ class DensePixelTextLayer(nn.Module):
         super().__init__()
         
         self.img_proj = nn.Conv3d(img_dim, img_dim, kernel_size=1)
-        
-        # 【关键点】CrossAttention 的 Key/Value 投影层
-        # 它负责把"较宽"的文本特征 (current_text_dim) 投影到图像空间 (img_dim)
         self.text_proj = nn.Linear(current_text_dim, img_dim)
         
         self.diff_conv = nn.Sequential(
@@ -122,9 +119,13 @@ class DensePixelTextLayer(nn.Module):
             nn.ReLU(inplace=True)
         )
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=img_dim, num_heads=4, batch_first=True, dropout=dropout_rate
+            embed_dim=img_dim, 
+            num_heads=4, 
+            batch_first=True, 
+            dropout=dropout_rate
         )
         self.norm = nn.LayerNorm(img_dim)
+        
         self.fusion_conv = nn.Sequential(
             nn.Conv3d(img_dim * 2, img_dim, kernel_size=1),
             nn.InstanceNorm3d(img_dim),
@@ -133,19 +134,42 @@ class DensePixelTextLayer(nn.Module):
         )
 
     def forward(self, f1, f2, text_seq):
+        """
+        f1, f2: [B, C, D, H, W]
+        text_seq: [B, Seq_Len, C_text]
+        """
         B, C, D, H, W = f1.shape
         raw_diff = f2 - f1
         diff_feat = self.diff_conv(raw_diff)
+        
+        # 1. 准备 Query (Image)
         q = rearrange(self.img_proj(diff_feat), 'b c d h w -> b (d h w) c')
         
-        # k, v 的投影过程完成了维度压缩
+        # 2. 准备 Key/Value (Text)
         k = v = self.text_proj(text_seq)
         
-        attn_out, _ = self.cross_attn(query=q, key=k, value=v)
-        q = self.norm(q + attn_out)
+        # --- 【关键修正】强制 FP32 计算 Attention ---
+        # 防止 FP16 下 exp() 溢出导致 NaN
+        with torch.cuda.amp.autocast(enabled=False):
+            # 必须手动转为 float32
+            q_fp32 = q.float()
+            k_fp32 = k.float()
+            v_fp32 = v.float()
+            
+            attn_out, _ = self.cross_attn(query=q_fp32, key=k_fp32, value=v_fp32)
+            
+            # LayerNorm 也建议在 FP32 下做，或者转回来
+            # 这里为了安全，先加残差再 Norm，全部在 FP32
+            q_out = self.norm(q_fp32 + attn_out)
+            
+        # 3. 转回原来的 dtype (可能是 FP16) 以兼容后续网络
+        # 这里的 q_out 是 FP32，但外面期望的是 AMP 上下文的类型
+        q = q_out.to(diff_feat.dtype) 
+        
+        # 4. 恢复空间维度
         attn_feat = rearrange(q, 'b (d h w) c -> b c d h w', d=D, h=H, w=W)
+        
         return self.fusion_conv(torch.cat([f2, attn_feat], dim=1))
-
 # ==========================================
 # 3. 集成模块 (Integrated Module)
 # ==========================================

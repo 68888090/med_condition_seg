@@ -14,8 +14,10 @@ training:
   n_folds: 10
   patience: 1000
   main_loss_weight: 1.0
-  aux_loss_weight: 0.4
+  aux_loss_weight: 0.2
   reg_loss_weight: 0.0
+  cls_loss_weight: 0.4
+
   val_target: "main"  # “main / "aux"
 
 model:
@@ -50,6 +52,9 @@ data:
   jsonlist: "/home/lhr/dataset/Union_for_lx_Rigid_lung_mask_Crop_64mm_Rigid/train_dataloader.json"
 
 optimization:
+  stage1_steps: 40000
+  stage1_lr: 4.0e-4
+  stage2_lr: 5.0e-5
   lr: 4.0e-4                     # learning rate
   decay: 0.1                     # decay rate
   momentum: 0.9                  # momentum
@@ -70,4 +75,5 @@ system:
 
 experiment:
   project: "UnionData"
-  name: "cls_1"
+  name: "step_1"
+  mode: "pure_seg"  #pure_seg \  train_multimodal

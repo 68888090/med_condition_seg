@@ -41,12 +41,17 @@ class SwinTransformerBackbone(nn.Module):
         # 3. 提取编码器 (SwinViT) 并注册为子模块
         # 这样会自动管理梯度和设备移动
         self.backbone = full_model.swinViT
+        self.encoder1 = full_model.encoder1
+        self.encoder2 = full_model.encoder2
+        self.encoder3 = full_model.encoder3
+        self.encoder4 = full_model.encoder4
+        self.encoder10 = full_model.encoder10
         
         # 释放不需要的解码器显存 (可选，python GC 会处理，但手动删更保险)
-        del full_model.encoder1
-        del full_model.encoder2
-        del full_model.encoder3
-        del full_model.encoder4
+        # del full_model.encoder1
+        # del full_model.encoder2
+        # del full_model.encoder3
+        # del full_model.encoder4
         del full_model.decoder5
         del full_model.decoder4
         del full_model.decoder3
@@ -57,7 +62,14 @@ class SwinTransformerBackbone(nn.Module):
     def forward(self, x):
         # normalize=True 会在输出前进行 LayerNorm，这对分类任务很重要
         hidden_states = self.backbone(x, normalize=True)
-        return hidden_states
+        enc0 = self.encoder1(x)
+        enc1 = self.encoder2(hidden_states[0])
+        enc2 = self.encoder3(hidden_states[1])
+        enc3 = self.encoder4(hidden_states[2])
+        enc4 = self.encoder10(hidden_states[4])
+        new_hidden_states = [enc1, enc2, enc3, hidden_states[3], enc4]
+
+        return new_hidden_states, enc0
 
 
 # --- 使用方式 ---

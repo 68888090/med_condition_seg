@@ -16,6 +16,8 @@ training:
   main_loss_weight: 1.0
   aux_loss_weight: 0.4
   reg_loss_weight: 0.0
+  cls_loss_weight: 0.4
+
   val_target: "main"  # “main / "aux"
 
 model:
@@ -70,4 +72,4 @@ system:
 
 experiment:
   project: "UnionData"
-  name: "cls_1"
+  name: "cls_2"

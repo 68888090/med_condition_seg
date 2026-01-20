@@ -147,3 +147,4 @@ runs/
 debug_vis/
 final_analysis/
 *.json
+temp_json/

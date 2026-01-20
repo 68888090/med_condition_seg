@@ -42,8 +42,9 @@ class PriorGuidedGatedAttentionLayer(nn.Module):
         self.k_bias = nn.Parameter(torch.tensor(math.log(initial_k)))
         
         # 4. 融合后的平滑处理
+        self.out = nn.Conv3d(img_dim, img_dim, kernel_size=3, padding=1)
         self.fusion_norm = nn.InstanceNorm3d(img_dim)
-        self.fusion_act = nn.ReLU(inplace=True)
+        # self.fusion_act = nn.ReLU(inplace=True)
 
     def forward(self, f1, f2, text_seq):
         """
@@ -88,8 +89,10 @@ class PriorGuidedGatedAttentionLayer(nn.Module):
         
         # --- D. 动态融合 ---
         f_fused = alpha * f2 + beta * f_diff
-        
-        return self.fusion_act(self.fusion_norm(f_fused))
+
+        f_fused = self.out(f_fused)
+        # return self.fusion_act(self.fusion_norm(f_fused))
+        return self.fusion_norm(f_fused)
 
 class SimpleGateLayer(nn.Module):
     """
@@ -111,7 +114,7 @@ class SimpleGateLayer(nn.Module):
         self.fusion_conv = nn.Sequential(
             nn.Conv3d(channels * 2, channels, kernel_size=1),
             nn.InstanceNorm3d(channels),
-            nn.ReLU(inplace=True)
+            # nn.ReLU(inplace=True)
         )
 
     def forward(self, f1, f2, text_global):
